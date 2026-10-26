@@ -13,7 +13,12 @@ import httpx
 import requests
 
 from ._commands import CommandResult, Commands
-from ._config import Config, _auth_headers
+from ._config import (
+    PAUSE_RESUME_REQUEST_TIMEOUT_S,
+    SNAPSHOT_REQUEST_TIMEOUT_S,
+    Config,
+    _auth_headers,
+)
 from ._exceptions import ApiError, AuthenticationError, CubeSandboxError, SandboxNotFoundError, TemplateNotFoundError
 from ._filesystem import Filesystem
 from ._models import Execution, ExecutionError, OutputMessage, Result, SandboxInfo, SnapshotInfo
@@ -379,8 +384,12 @@ class Sandbox:
             payload["mcp"] = mcp
         s = requests.Session()
         for tpl in templates:
-            resp = s.post(f"{cfg.api_url}/sandboxes", json={**payload, "templateID": tpl, **kwargs},
-                          headers={"Content-Type": "application/json", **_auth_headers(cfg)})
+            resp = s.post(
+                f"{cfg.api_url}/sandboxes",
+                json={**payload, "templateID": tpl, **kwargs},
+                headers={"Content-Type": "application/json", **_auth_headers(cfg)},
+                timeout=cfg.request_timeout,
+            )
             if not (fallback and _is_template_not_found(resp)):
                 break
         else:
@@ -440,9 +449,12 @@ class Sandbox:
         body: dict[str, int] = {}
         if timeout is not None:
             body["timeout"] = timeout
-        resp = s.post(f"{cfg.api_url}/sandboxes/{sandbox_id}/connect",
-                      json=body,
-                      headers={"Content-Type": "application/json", **_auth_headers(cfg)})
+        resp = s.post(
+            f"{cfg.api_url}/sandboxes/{sandbox_id}/connect",
+            json=body,
+            headers={"Content-Type": "application/json", **_auth_headers(cfg)},
+            timeout=max(cfg.request_timeout, PAUSE_RESUME_REQUEST_TIMEOUT_S),
+        )
         _check_response(resp)
         return cls(resp.json(), config=cfg)
 
@@ -460,7 +472,11 @@ class Sandbox:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/sandboxes", headers=_auth_headers(cfg))
+        resp = s.get(
+            f"{cfg.api_url}/sandboxes",
+            headers=_auth_headers(cfg),
+            timeout=cfg.request_timeout,
+        )
         _check_response(resp)
         return resp.json()
 
@@ -493,6 +509,7 @@ class Sandbox:
                 f"{cfg.api_url}/v2/sandboxes",
                 headers=_auth_headers(cfg),
                 params=params,
+                timeout=cfg.request_timeout,
             )
             _check_response(resp)
             collected.extend(resp.json())
@@ -515,7 +532,11 @@ class Sandbox:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/health", headers=_auth_headers(cfg))
+        resp = s.get(
+            f"{cfg.api_url}/health",
+            headers=_auth_headers(cfg),
+            timeout=cfg.request_timeout,
+        )
         _check_response(resp)
         return resp.json()
 
@@ -607,7 +628,10 @@ class Sandbox:
                 ``"paused"`` state within ``timeout`` seconds.
         """
         import time
-        resp = self._session.post(f"{self._config.api_url}/sandboxes/{self.sandbox_id}/pause")
+        resp = self._session.post(
+            f"{self._config.api_url}/sandboxes/{self.sandbox_id}/pause",
+            timeout=max(self._config.request_timeout, PAUSE_RESUME_REQUEST_TIMEOUT_S),
+        )
         _check_response(resp)
         if wait:
             deadline = time.monotonic() + timeout
@@ -641,6 +665,7 @@ class Sandbox:
         resp = self._session.post(
             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/resume",
             json=body,
+            timeout=max(self._config.request_timeout, PAUSE_RESUME_REQUEST_TIMEOUT_S),
         )
         _check_response(resp)
 
@@ -659,6 +684,7 @@ class Sandbox:
         resp = self._session.post(
             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/timeout",
             json={"timeout": timeout},
+            timeout=self._config.request_timeout,
         )
         _check_response(resp)
 
@@ -692,6 +718,7 @@ class Sandbox:
         resp = self._session.put(
             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/network",
             json=_build_network_update_body(network or {}),
+            timeout=self._config.request_timeout,
         )
         _check_response(resp)
 
@@ -702,7 +729,10 @@ class Sandbox:
             SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
             ApiError: On unexpected backend error (HTTP 500).
         """
-        resp = self._session.delete(f"{self._config.api_url}/sandboxes/{self.sandbox_id}")
+        resp = self._session.delete(
+            f"{self._config.api_url}/sandboxes/{self.sandbox_id}",
+            timeout=self._config.request_timeout,
+        )
         _check_response(resp)
         if self._clone_cleanup is not None:
             self._clone_cleanup.release(self.sandbox_id)
@@ -725,7 +755,10 @@ class Sandbox:
             SandboxNotFoundError: If the sandbox does not exist (HTTP 404).
             ApiError: On unexpected backend error (HTTP 500).
         """
-        resp = self._session.get(f"{self._config.api_url}/sandboxes/{self.sandbox_id}")
+        resp = self._session.get(
+            f"{self._config.api_url}/sandboxes/{self.sandbox_id}",
+            timeout=self._config.request_timeout,
+        )
         _check_response(resp)
         return SandboxInfo.from_dict(resp.json())
 
@@ -779,6 +812,7 @@ class Sandbox:
         resp = self._session.post(
             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/snapshots",
             json=payload,
+            timeout=max(self._config.request_timeout, SNAPSHOT_REQUEST_TIMEOUT_S),
         )
         _check_response(resp)
         return SnapshotInfo.from_dict(resp.json())
@@ -813,7 +847,12 @@ class Sandbox:
         if next_token is not None:
             params["nextToken"] = next_token
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/snapshots", params=params, headers=_auth_headers(cfg))
+        resp = s.get(
+            f"{cfg.api_url}/snapshots",
+            params=params,
+            headers=_auth_headers(cfg),
+            timeout=cfg.request_timeout,
+        )
         _check_response(resp)
         items = [SnapshotInfo.from_dict(d) for d in (resp.json() or [])]
         nt = resp.headers.get("x-next-token") or None
@@ -837,7 +876,11 @@ class Sandbox:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.delete(f"{cfg.api_url}/templates/{snapshot_id}", headers=_auth_headers(cfg))
+        resp = s.delete(
+            f"{cfg.api_url}/templates/{snapshot_id}",
+            headers=_auth_headers(cfg),
+            timeout=max(cfg.request_timeout, SNAPSHOT_REQUEST_TIMEOUT_S),
+        )
         _check_response(resp)
 
     # 1.4 — create_from_snapshot is covered by Sandbox.create(template=snapshot_id).
@@ -873,6 +916,7 @@ class Sandbox:
         resp = self._session.post(
             f"{self._config.api_url}/sandboxes/{self.sandbox_id}/rollback",
             json={"snapshotID": snapshot_id},
+            timeout=max(self._config.request_timeout, SNAPSHOT_REQUEST_TIMEOUT_S),
         )
         _check_response(resp)
         result = resp.json()

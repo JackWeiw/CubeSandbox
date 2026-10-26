@@ -3000,6 +3000,7 @@ class TestTemplateAPI:
                 "allowInternetAccess": True,
             },
             headers={"Content-Type": "application/json"},
+            timeout=config.request_timeout,
         )
         assert job.job_id == "job-001"
         assert job.template_id == "tpl-python"
@@ -3048,6 +3049,7 @@ class TestTemplateAPI:
                 "enableIvshmem": True,
             },
             headers={"Content-Type": "application/json"},
+            timeout=config.request_timeout,
         )
 
     def test_build_rejects_allow_out_domain_without_deny_all(self):
@@ -3171,7 +3173,8 @@ class TestTemplateAPI:
         get.assert_called_once_with(
             "http://localhost:3000/templates/tpl-network",
             params={},
-            headers={}
+            headers={},
+            timeout=config.request_timeout,
         )
         assert info.template_id == "tpl-network"
         assert info.network_type == "tap"
@@ -3196,6 +3199,7 @@ class TestTemplateAPI:
             "http://localhost:3000/templates/tpl-python",
             json={"force": True},
             headers={"Content-Type": "application/json"},
+            timeout=make_config().request_timeout,
         )
         assert job.job_id == "job-002"
 
@@ -3272,3 +3276,143 @@ class TestListV2Pagination:
 
         assert result == only
         assert get_call.call_count == 1, "a cursor-less page must not trigger a refetch"
+
+
+# ── Control-plane timeouts ────────────────────────────────────────────────────
+
+class TestControlPlaneTimeout:
+    """Every control-plane call passes a bounded ``timeout=``.
+
+    ``requests`` defaults to ``timeout=None`` (block forever), so a single
+    blackholed control-plane call wedges the SDK indefinitely. The data plane
+    (``_transport.build_client``) and the volume API (``_volume``) already wire
+    ``Config.request_timeout``; this asserts the sandbox/template control plane
+    does the same, so a dropped ``timeout=`` regresses loudly.
+
+    Long routes mirror CubeAPI's per-router budgets (``CubeAPI/src/routes.rs``):
+    pause/resume/connect sit on the 120 s router, create_snapshot/rollback and
+    template/snapshot deletes on the 240 s router. Each gets a
+    ``max(cfg.request_timeout, BUDGET)`` floor so a tight ``request_timeout``
+    never preempts a legitimately-slow op — mirroring ``Sandbox.fork``'s
+    ``FORK_REQUEST_TIMEOUT_S``. Fast routes pass ``cfg.request_timeout`` straight.
+    """
+
+    SENTINEL = 7.0  # below both long-route floors, so max() picks the floor
+
+    def _cfg(self) -> Config:
+        return make_config(request_timeout=self.SENTINEL)
+
+    @staticmethod
+    def _expected(method: str, url: str) -> float:
+        # 120 s router (CubeAPI PAUSE_RESUME_ROUTE_TIMEOUT)
+        if url.endswith("/pause") or url.endswith("/resume") or url.endswith("/connect"):
+            return 160.0
+        # 240 s router (CubeAPI SNAPSHOT_LONG_ROUTE_TIMEOUT)
+        if url.endswith("/rollback"):
+            return 280.0
+        if url.endswith("/snapshots") and method == "post":  # create_snapshot
+            return 280.0
+        if "/templates/" in url and method == "delete":  # delete_snapshot + Template.delete
+            return 280.0
+        return 7.0  # 30 s default router
+
+    @staticmethod
+    def _collect(mocks):
+        """Flatten (method, url, timeout) per call; mocks order = post,get,put,delete."""
+        out = []
+        for method, m in zip(("post", "get", "put", "delete"), mocks):
+            for call in m.call_args_list:
+                out.append((method, call.args[0], call.kwargs.get("timeout")))
+        return out
+
+    def _assert_tiers(self, mocks) -> None:
+        mismatches = []
+        for method, url, got in self._collect(mocks):
+            exp = self._expected(method, url)
+            if got != exp:
+                mismatches.append((method, url, got, exp))
+        assert not mismatches, f"control-plane timeout mismatch: {mismatches}"
+
+    def test_instance_calls_pass_request_timeout(self):
+        cfg = self._cfg()
+        sb = Sandbox(SANDBOX_DATA, config=cfg)
+        patches = [
+            patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA)),
+            patch("requests.Session.get", return_value=mock_response(SANDBOX_DATA)),
+            patch("requests.Session.put", return_value=mock_response(SANDBOX_DATA)),
+            patch("requests.Session.delete", return_value=mock_response(SANDBOX_DATA)),
+        ]
+        mocks = [p.start() for p in patches]
+        try:
+            sb.pause(wait=False)
+            sb.resume()
+            sb.set_timeout(60)
+            sb.update_network(None)
+            sb.kill()
+            sb.get_info()
+            sb.create_snapshot()
+            sb.rollback("snap-1")
+        finally:
+            for p in patches:
+                p.stop()
+        self._assert_tiers(mocks)
+
+    def test_classmethod_calls_pass_request_timeout(self):
+        cfg = self._cfg()
+
+        def _get_resp(url, **_):
+            # list_snapshots iterates resp.json() as a list; every other call
+            # parses it as a dict via *.from_dict, so a dict response works.
+            return mock_response([] if url.endswith("/snapshots") else SANDBOX_DATA)
+
+        patches = [
+            patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA)),
+            patch("requests.Session.get", side_effect=_get_resp),
+            patch("requests.Session.put", return_value=mock_response(SANDBOX_DATA)),
+            patch("requests.Session.delete", return_value=mock_response(SANDBOX_DATA)),
+        ]
+        mocks = [p.start() for p in patches]
+        try:
+            Sandbox.create(template="tpl-test", config=cfg)
+            Sandbox.connect(SANDBOX_ID, config=cfg)
+            Sandbox.list(config=cfg)
+            Sandbox.list_v2(config=cfg)
+            Sandbox.health(config=cfg)
+            Sandbox.list_snapshots(config=cfg)
+            Sandbox.delete_snapshot("snap-test", config=cfg)
+            Template.list(config=cfg)
+            Template.get("tpl-test", config=cfg)
+            Template.build(image="python:3.11-slim", config=cfg)
+            Template.rebuild("tpl-test", config=cfg)
+            Template.get_build_status("tpl-test", "build-1", config=cfg)
+            Template.get_build_logs("tpl-test", "build-1", config=cfg)
+            Template.delete("tpl-test", config=cfg)
+            Template.set_alias("tpl-test", "alias-1", config=cfg)
+        finally:
+            for p in patches:
+                p.stop()
+        self._assert_tiers(mocks)
+
+    def test_request_timeout_above_floors_passes_through(self):
+        """max() means a request_timeout above every floor wins everywhere."""
+        cfg = make_config(request_timeout=999.0)
+        sb = Sandbox(SANDBOX_DATA, config=cfg)
+        patches = [
+            patch("requests.Session.post", return_value=mock_response(SANDBOX_DATA)),
+            patch("requests.Session.get", return_value=mock_response(SANDBOX_DATA)),
+            patch("requests.Session.put", return_value=mock_response(SANDBOX_DATA)),
+            patch("requests.Session.delete", return_value=mock_response(SANDBOX_DATA)),
+        ]
+        mocks = [p.start() for p in patches]
+        try:
+            sb.pause(wait=False)
+            sb.create_snapshot()
+            sb.rollback("snap-1")
+            sb.kill()
+        finally:
+            for p in patches:
+                p.stop()
+        seen = {t for _, _, t in self._collect(mocks)}
+        assert seen == {999.0}, (
+            f"request_timeout above floors should pass through; saw {seen}"
+        )

@@ -8,7 +8,7 @@ from typing import Any, Dict
 
 import requests
 
-from ._config import Config, _auth_headers
+from ._config import SNAPSHOT_REQUEST_TIMEOUT_S, Config, _auth_headers
 from ._exceptions import ApiError, AuthenticationError, TemplateNotFoundError
 from ._policy import _validate_allow_out_domains_require_deny_all
 
@@ -160,7 +160,11 @@ class Template:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/templates", headers=_auth_headers(cfg))
+        resp = s.get(
+            f"{cfg.api_url}/templates",
+            headers=_auth_headers(cfg),
+            timeout=cfg.request_timeout,
+        )
         _check_response(resp)
         data = resp.json() or []
         if isinstance(data, dict):
@@ -200,8 +204,12 @@ class Template:
         if next_token is not None:
             params["nextToken"] = next_token
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/templates/{template_id}", params=params,
-                     headers=_auth_headers(cfg))
+        resp = s.get(
+            f"{cfg.api_url}/templates/{template_id}",
+            params=params,
+            headers=_auth_headers(cfg),
+            timeout=cfg.request_timeout,
+        )
         _check_response(resp)
         return TemplateInfo.from_dict(resp.json())
 
@@ -344,6 +352,7 @@ class Template:
             f"{cfg.api_url}/templates",
             json=payload,
             headers={"Content-Type": "application/json", **_auth_headers(cfg)},
+            timeout=cfg.request_timeout,
         )
         _check_response(resp)
         return TemplateBuild.from_dict(resp.json())
@@ -364,6 +373,7 @@ class Template:
             f"{cfg.api_url}/templates/{template_id}",
             json=extra,
             headers={"Content-Type": "application/json", **_auth_headers(cfg)},
+            timeout=cfg.request_timeout,
         )
         _check_response(resp)
         return TemplateBuild.from_dict(resp.json())
@@ -380,8 +390,11 @@ class Template:
         """GET /templates/:templateID/builds/:buildID/status."""
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/templates/{template_id}/builds/{build_id}/status",
-                     headers=_auth_headers(cfg))
+        resp = s.get(
+            f"{cfg.api_url}/templates/{template_id}/builds/{build_id}/status",
+            headers=_auth_headers(cfg),
+            timeout=cfg.request_timeout,
+        )
         _check_response(resp)
         return TemplateBuild.from_dict(resp.json())
 
@@ -397,8 +410,11 @@ class Template:
         """GET /templates/:templateID/builds/:buildID/logs."""
         cfg = config or Config()
         s = requests.Session()
-        resp = s.get(f"{cfg.api_url}/templates/{template_id}/builds/{build_id}/logs",
-                     headers=_auth_headers(cfg))
+        resp = s.get(
+            f"{cfg.api_url}/templates/{template_id}/builds/{build_id}/logs",
+            headers=_auth_headers(cfg),
+            timeout=cfg.request_timeout,
+        )
         _check_response(resp)
         return resp.json()
 
@@ -447,7 +463,11 @@ class Template:
         """
         cfg = config or Config()
         s = requests.Session()
-        resp = s.delete(f"{cfg.api_url}/templates/{template_id}", headers=_auth_headers(cfg))
+        resp = s.delete(
+            f"{cfg.api_url}/templates/{template_id}",
+            headers=_auth_headers(cfg),
+            timeout=max(cfg.request_timeout, SNAPSHOT_REQUEST_TIMEOUT_S),
+        )
         _check_response(resp)
 
 
@@ -482,6 +502,7 @@ class Template:
             f"{cfg.api_url}/templates/{template_id}/alias",
             json=payload,
             headers={"Content-Type": "application/json", **_auth_headers(cfg)},
+            timeout=cfg.request_timeout,
         )
         _check_response(resp)
         return TemplateInfo.from_dict(resp.json())
