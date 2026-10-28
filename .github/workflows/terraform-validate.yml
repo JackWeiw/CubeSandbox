@@ -18,6 +18,9 @@ on:
       - 'deploy/scripts/docker-install-volume-deps.sh'
       - 'deploy/one-click/webui/**'
       - 'deploy/one-click/cubeproxy/**'
+      # test_coredns_corefile_template.sh statically guards the CoreDNS
+      # config template; a PR editing only the template must run that guard.
+      - 'deploy/one-click/coredns/**'
       - 'CubeProxy/Dockerfile'
       # bump-image.sh is the single source of truth for the hard-coded image
       # tags this deployer bakes in; test_bump_image.sh guards it.
