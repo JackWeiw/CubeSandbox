@@ -8,9 +8,10 @@
         answer "{{ .Name }} 60 IN A __CUBE_PROXY_DNS_ANSWER_IP__"
         fallthrough
     }
-    # IPv4-only proxy stack: answer AAAA locally with NODATA (NOERROR, empty
-    # answer) so clients don't stall on an unreachable upstream resolver.
-    # Do not add an AAAA record or `fallthrough` here.
+    # *.cube.app only ever resolves to the node's IPv4 (the A templates
+    # above), so answer AAAA locally with NODATA (NOERROR, empty answer)
+    # instead of forwarding to an upstream that may be unreachable and stall
+    # clients. Do not add an AAAA record or `fallthrough` here.
     template IN AAAA cube.app {
         rcode NOERROR
     }
